@@ -1,0 +1,75 @@
+@RestController
+@RequestMapping("/bank")
+public class BankAccountController {
+
+    @Autowired
+    private JdbcTemplate jdbcTemplate;
+
+    @Autowired
+    private SnsClient snsClient;
+
+    @PostMapping("/withdraw")
+    public ResponseEntity<String> withdraw(@RequestParam("accountId") Long accountId, 
+                                           @RequestParam("amount") BigDecimal amount) {
+        try {
+            if (amount.compareTo(BigDecimal.ZERO) <= 0) {
+                return ResponseEntity.badRequest().body("Withdrawal amount must be positive.");
+            }
+            
+            BigDecimal currentBalance = getBalance(accountId);
+            if (currentBalance == null || currentBalance.compareTo(amount) < 0) {
+                return ResponseEntity.status(HttpStatus.BAD_REQUEST).body("Insufficient funds.");
+            }
+
+            boolean success = updateBalance(accountId, amount);
+            if (!success) {
+                return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body("Withdrawal failed.");
+            }
+
+            publishWithdrawalEvent(accountId, amount, "SUCCESSFUL");
+            return ResponseEntity.ok("Withdrawal successful.");
+        } catch (Exception e) {
+            // Log the exception details for debugging
+            Logger.getLogger(BankAccountController.class.getName()).log(Level.SEVERE, null, e);
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body("An error occurred.");
+        }
+    }
+
+    private BigDecimal getBalance(Long accountId) {
+        String sql = "SELECT balance FROM accounts WHERE id = ?";
+        return jdbcTemplate.queryForObject(sql, new Object[]{accountId}, BigDecimal.class);
+    }
+
+    private boolean updateBalance(Long accountId, BigDecimal amount) {
+        String sql = "UPDATE accounts SET balance = balance - ? WHERE id = ?";
+        return jdbcTemplate.update(sql, amount, accountId) > 0;
+    }
+
+    private void publishWithdrawalEvent(Long accountId, BigDecimal amount, String status) {
+        WithdrawalEvent event = new WithdrawalEvent(amount, accountId, status);
+        String eventJson = event.toJson();
+        String snsTopicArn = "arn:aws:sns:YOUR_REGION:YOUR_ACCOUNT_ID:YOUR_TOPIC_NAME";
+
+        PublishRequest publishRequest = PublishRequest.builder()
+                .message(eventJson)
+                .topicArn(snsTopicArn)
+                .build();
+        snsClient.publish(publishRequest);
+    }
+}
+
+public class WithdrawalEvent {
+    private BigDecimal amount;
+    private Long accountId;
+    private String status;
+
+    public WithdrawalEvent(BigDecimal amount, Long accountId, String status) {
+        this.amount = amount;
+        this.accountId = accountId;
+        this.status = status;
+    }
+
+    public String toJson() {
+        return String.format("{\"amount\":\"%s\",\"accountId\":%d,\"status\":\"%s\"}", amount, accountId, status);
+    }
+}
